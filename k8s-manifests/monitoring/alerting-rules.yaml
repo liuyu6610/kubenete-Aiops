@@ -1,0 +1,186 @@
+---
+# Prometheus 自定义告警规则
+# 应用方式: kubectl apply -f k8s-manifests/monitoring/alerting-rules.yaml
+# 依赖: kube-prometheus-stack 已安装 (PrometheusRule CRD 存在)
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: kubesentinel-alerting-rules
+  namespace: monitoring
+  labels:
+    # 这个 label 必须与 kube-prometheus-stack 的 ruleSelector 匹配
+    release: kube-prometheus-stack
+    app: kube-prometheus-stack
+spec:
+  groups:
+    # ============================================================
+    # 组 1：Pod 级别告警
+    # ============================================================
+    - name: pod-alerts
+      interval: 30s  # 每 30 秒评估一次
+      rules:
+        # 规则 1：Pod CPU 使用率持续偏高
+        - alert: PodCpuHighUsage
+          expr: |
+            (
+              sum(rate(container_cpu_usage_seconds_total{
+                namespace=~"default|demo-app",
+                container!="",
+                container!="POD"
+              }[5m])) by (namespace, pod, container)
+              /
+              sum(kube_pod_container_resource_limits{
+                resource="cpu",
+                namespace=~"default|demo-app"
+              }) by (namespace, pod, container)
+            ) > 0.80
+          for: 2m  # 持续 2 分钟才触发，避免瞬时抖动
+          labels:
+            severity: warning
+            team: platform
+            action_type: restart_pod  # 供 LLM 参考的预期动作
+          annotations:
+            summary: "Pod {{ $labels.pod }} CPU 使用率超过 80%"
+            description: |
+              Pod {{ $labels.pod }} 在命名空间 {{ $labels.namespace }} 中的容器 {{ $labels.container }}
+              CPU 使用率当前为 {{ $value | humanizePercentage }}，超过了 limits 的 80% 阈值，持续 2 分钟。
+              建议检查是否存在请求积压或内存泄漏。
+            runbook_url: "https://github.com/your-org/KubeSentinel-aiops/blob/main/docs/runbooks/cpu-high.md"
+
+        # 规则 2：Pod CPU 严重超负载
+        - alert: PodCpuCritical
+          expr: |
+            (
+              sum(rate(container_cpu_usage_seconds_total{
+                namespace=~"default|demo-app",
+                container!="",
+                container!="POD"
+              }[5m])) by (namespace, pod, container)
+              /
+              sum(kube_pod_container_resource_limits{
+                resource="cpu",
+                namespace=~"default|demo-app"
+              }) by (namespace, pod, container)
+            ) > 0.95
+          for: 1m
+          labels:
+            severity: critical
+            team: platform
+            action_type: rolling_restart
+          annotations:
+            summary: "🚨 Pod {{ $labels.pod }} CPU 使用率严重超限 (>95%)"
+            description: |
+              Pod {{ $labels.pod }} CPU 使用率已达 {{ $value | humanizePercentage }}，触发紧急自愈流程。
+
+        # 规则 3：Pod 内存使用率过高
+        - alert: PodMemoryHighUsage
+          expr: |
+            (
+              sum(container_memory_working_set_bytes{
+                namespace=~"default|demo-app",
+                container!="",
+                container!="POD"
+              }) by (namespace, pod, container)
+              /
+              sum(kube_pod_container_resource_limits{
+                resource="memory",
+                namespace=~"default|demo-app"
+              }) by (namespace, pod, container)
+            ) > 0.85
+          for: 3m
+          labels:
+            severity: warning
+            team: platform
+            action_type: scale_up
+          annotations:
+            summary: "Pod {{ $labels.pod }} 内存使用率超过 85%"
+            description: "Pod {{ $labels.pod }} 内存使用率为 {{ $value | humanizePercentage }}，有 OOM 风险。"
+
+        # 规则 4：Pod 频繁重启 (CrashLoopBackOff 预警)
+        - alert: PodFrequentRestarts
+          expr: |
+            increase(kube_pod_container_status_restarts_total{
+              namespace=~"default|demo-app"
+            }[30m]) > 3
+          for: 0m
+          labels:
+            severity: warning
+            team: platform
+            action_type: investigate
+          annotations:
+            summary: "Pod {{ $labels.pod }} 30 分钟内重启超过 3 次"
+            description: "Pod {{ $labels.pod }} 可能处于 CrashLoopBackOff 状态，需要检查日志。"
+
+        # 规则 5：Pod 不可用（Ready 状态为 False）
+        - alert: PodNotReady
+          expr: |
+            kube_pod_container_status_ready{
+              namespace=~"default|demo-app"
+            } == 0
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+            action_type: rollback_or_restart
+          annotations:
+            summary: "Pod {{ $labels.pod }} 已超过 5 分钟不可用"
+            description: "Pod {{ $labels.pod }} Ready 状态持续为 False，服务可能已中断。"
+
+    # ============================================================
+    # 组 2：Deployment 级别告警
+    # ============================================================
+    - name: deployment-alerts
+      interval: 60s
+      rules:
+        # 规则 6：Deployment 可用副本不足
+        - alert: DeploymentReplicasMismatch
+          expr: |
+            (
+              kube_deployment_spec_replicas{namespace=~"default|demo-app"}
+              !=
+              kube_deployment_status_replicas_available{namespace=~"default|demo-app"}
+            )
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+            action_type: scale_up
+          annotations:
+            summary: "Deployment {{ $labels.deployment }} 副本数不满足期望"
+            description: |
+              期望 {{ $value }} 个副本，当前可用副本数不足，持续 5 分钟。
+
+    # ============================================================
+    # 组 3：节点级别告警
+    # ============================================================
+    - name: node-alerts
+      interval: 60s
+      rules:
+        # 规则 7：节点 CPU 使用率过高
+        - alert: NodeCpuHighUsage
+          expr: |
+            1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m])) by (instance) > 0.85
+          for: 5m
+          labels:
+            severity: warning
+            team: platform
+            action_type: cordon_node
+          annotations:
+            summary: "节点 {{ $labels.instance }} CPU 使用率超过 85%"
+            description: "节点 CPU 使用率长期偏高，可能影响该节点上所有 Pod 的性能。"
+
+        # 规则 8：节点内存使用率过高
+        - alert: NodeMemoryHighUsage
+          expr: |
+            (
+              1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+            ) > 0.90
+          for: 5m
+          labels:
+            severity: critical
+            team: platform
+            action_type: cordon_node
+          annotations:
+            summary: "节点 {{ $labels.instance }} 内存使用率超过 90%"
+            description: "节点内存严重不足，存在 OOM Killer 触发风险，建议立即迁移 Pod。"

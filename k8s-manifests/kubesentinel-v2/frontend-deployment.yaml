@@ -1,0 +1,50 @@
+---
+# KubeSentinel v2.0 - 自研前端大屏部署清单模板
+# d:\school-project\KubeSentinel-aiops\k8s-manifests\kubesentinel-v2\frontend-deployment.yaml
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesentinel-frontend
+  namespace: monitoring
+  labels:
+    app: kubesentinel-frontend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubesentinel-frontend
+  template:
+    metadata:
+      labels:
+        app: kubesentinel-frontend
+    spec:
+      containers:
+        - name: frontend
+          image: kubesentinel/frontend:latest # TODO: 构建后镜像
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubesentinel-frontend
+  namespace: monitoring
+spec:
+  type: NodePort
+  selector:
+    app: kubesentinel-frontend
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80
+      nodePort: 30080  # 暴露前端访问入口

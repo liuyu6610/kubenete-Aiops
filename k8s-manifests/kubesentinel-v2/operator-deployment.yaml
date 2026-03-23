@@ -1,0 +1,30 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesentinel-operator
+  namespace: default
+  labels:
+    app: kubesentinel-operator
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubesentinel-operator
+  template:
+    metadata:
+      labels:
+        app: kubesentinel-operator
+    spec:
+      serviceAccountName: operator-sa
+      containers:
+      - name: autohealer-operator
+        # 在你本地构建之后，记得替换为你的 docker hub 地址
+        image: your-dockerhub-user/kubesentinel-operator:v1.0.0
+        imagePullPolicy: IfNotPresent
+        resources:
+          limits:
+            cpu: 200m
+            memory: 128Mi
+          requests:
+            cpu: 100m
+            memory: 64Mi

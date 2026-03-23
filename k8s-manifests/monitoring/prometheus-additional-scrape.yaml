@@ -1,0 +1,47 @@
+---
+# Prometheus 附加采集配置
+# 用于补充 kube-prometheus-stack 默认未覆盖的自定义服务指标
+# 应用方式: 通过 Prometheus Operator 的 AdditionalScrapeConfigs 挂载
+#
+# 在 Helm values 中引用: prometheus.prometheusSpec.additionalScrapeConfigs
+---
+
+# TODO: 以下为采集配置模板，根据实际部署的服务填写
+
+# ── demo-app 自定义指标采集 ───────────────────────────────────────
+# 如果 order-service 暴露了自定义 Prometheus 指标端点，在此配置
+
+# - job_name: 'demo-app-order-service'
+#   static_configs:
+#     - targets:
+#         - 'order-service.demo-app:8080'
+#   metrics_path: '/metrics'
+#   scrape_interval: 15s
+
+# ── n8n 指标采集（如 n8n 开启了 metrics 端点）────────────────────
+
+# - job_name: 'n8n-workflow-engine'
+#   static_configs:
+#     - targets:
+#         - 'n8n.monitoring:5678'
+#   metrics_path: '/metrics'
+#   scrape_interval: 30s
+
+# ── 外部服务健康检查（Blackbox Exporter）────────────────────────
+# 如安装了 blackbox-exporter，可配置 HTTP 健康检查
+
+# - job_name: 'blackbox-http'
+#   metrics_path: /probe
+#   params:
+#     module: [http_2xx]
+#   static_configs:
+#     - targets:
+#         - http://frontend-service.demo-app:80/health
+#         - http://order-service.demo-app:8080/get
+#   relabel_configs:
+#     - source_labels: [__address__]
+#       target_label: __param_target
+#     - source_labels: [__param_target]
+#       target_label: instance
+#     - target_label: __address__
+#       replacement: blackbox-exporter:9115

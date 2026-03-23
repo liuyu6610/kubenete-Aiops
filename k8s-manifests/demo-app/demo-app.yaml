@@ -1,0 +1,440 @@
+---
+# KubeSentinel Demo App - Kubernetes Manifests
+# 包含三个微服务组件：frontend (nginx), order-service (API), redis (缓存)
+# 所有组件均配置了资源限制和健康检查探针，用于故障注入演示
+---
+
+# ========================================================
+# Namespace
+# ========================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: demo-app
+  labels:
+    app.kubernetes.io/part-of: kubesentinel-demo
+
+---
+
+# ========================================================
+# FRONTEND: Nginx 前端服务
+# ========================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: demo-app
+  labels:
+    app: frontend
+    app.kubernetes.io/part-of: demo-app
+    app.kubernetes.io/component: frontend
+  annotations:
+    description: "KubeSentinel demo frontend - Nginx based UI"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: frontend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: frontend
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "80"
+    spec:
+      containers:
+        - name: frontend
+          image: nginx:1.25-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          # ✅ 资源声明：防止单 Pod 耗尽节点资源
+          resources:
+            requests:
+              cpu: "100m"       # 0.1 vCPU
+              memory: "128Mi"
+            limits:
+              cpu: "500m"       # 0.5 vCPU - 故障注入时 CPU 会超此限制触发告警
+              memory: "256Mi"
+          # ✅ 存活探针：检测 nginx 主进程是否响应
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+              scheme: HTTP
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+          # ✅ 就绪探针：确保 nginx 完全启动后才接收流量
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+              scheme: HTTP
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+            successThreshold: 1
+          # 挂载自定义 nginx 配置（反向代理到 order-service）
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/conf.d/default.conf
+              subPath: default.conf
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "nginx -s quit; while killall -0 nginx; do sleep 1; done"]
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: frontend-nginx-config
+      # 优雅终止：等待连接处理完毕
+      terminationGracePeriodSeconds: 30
+
+---
+
+# Frontend Nginx 配置：反向代理到 order-service
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: frontend-nginx-config
+  namespace: demo-app
+data:
+  default.conf: |
+    upstream order_service {
+        server order-service:8080;
+    }
+
+    server {
+        listen 80;
+        server_name _;
+
+        # 前端静态资源
+        location / {
+            root /usr/share/nginx/html;
+            index index.html index.htm;
+            try_files $uri $uri/ /index.html;
+
+            # 添加 KubeSentinel demo 标识页面
+            add_header X-Powered-By "KubeSentinel Demo" always;
+        }
+
+        # API 反向代理到 order-service
+        location /api/ {
+            proxy_pass http://order_service/;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_connect_timeout 5s;
+            proxy_read_timeout 30s;
+        }
+
+        # 健康检查端点（供 K8s 探针使用）
+        location /health {
+            return 200 'OK';
+            add_header Content-Type text/plain;
+        }
+    }
+
+---
+
+# Frontend Service (NodePort，对外暴露)
+apiVersion: v1
+kind: Service
+metadata:
+  name: frontend-service
+  namespace: demo-app
+  labels:
+    app: frontend
+    app.kubernetes.io/part-of: demo-app
+  annotations:
+    prometheus.io/scrape: "true"
+spec:
+  type: NodePort
+  selector:
+    app: frontend
+  ports:
+    - name: http
+      protocol: TCP
+      port: 80
+      targetPort: 80
+      nodePort: 30080  # 通过 <NodeIP>:30080 访问前端
+
+---
+
+# ========================================================
+# ORDER-SERVICE: 订单服务 API (使用 httpd 模拟)
+# ========================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: order-service
+  namespace: demo-app
+  labels:
+    app: order-service
+    app.kubernetes.io/part-of: demo-app
+    app.kubernetes.io/component: backend
+  annotations:
+    description: "KubeSentinel demo order service - REST API backend"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: order-service
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: order-service
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+    spec:
+      containers:
+        - name: order-service
+          # 使用 kennethreitz/httpbin 作为 API 模拟服务（提供丰富的 REST 端点）
+          image: kennethreitz/httpbin:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+              protocol: TCP
+          env:
+            - name: PORT
+              value: "80"
+            - name: SERVICE_NAME
+              value: "order-service"
+            - name: REDIS_HOST
+              value: "redis-service"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          # ✅ 资源声明：关键配置！故障注入时 CPU 会突破 limits 触发 Prometheus 告警
+          resources:
+            requests:
+              cpu: "200m"       # 0.2 vCPU
+              memory: "256Mi"
+            limits:
+              cpu: "800m"       # 0.8 vCPU - 告警阈值设为 70% limit = 消耗 ~560m 时触发
+              memory: "512Mi"
+          # ✅ 存活探针：HTTP 接口检测（httpbin 的 /get 端点）
+          livenessProbe:
+            httpGet:
+              path: /get
+              port: 80
+              scheme: HTTP
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+            successThreshold: 1
+          # ✅ 就绪探针：确保服务完全初始化
+          readinessProbe:
+            httpGet:
+              path: /get
+              port: 80
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+            successThreshold: 1
+          # Startup 探针（容器启动慢时防止被杀死）
+          startupProbe:
+            httpGet:
+              path: /get
+              port: 80
+            failureThreshold: 30
+            periodSeconds: 5
+      terminationGracePeriodSeconds: 60
+
+---
+
+# Order Service (ClusterIP，内部访问)
+apiVersion: v1
+kind: Service
+metadata:
+  name: order-service
+  namespace: demo-app
+  labels:
+    app: order-service
+    app.kubernetes.io/part-of: demo-app
+spec:
+  type: ClusterIP
+  selector:
+    app: order-service
+  ports:
+    - name: http
+      protocol: TCP
+      port: 8080
+      targetPort: 80
+
+---
+
+# ========================================================
+# REDIS: 缓存服务
+# ========================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: demo-app
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: demo-app
+    app.kubernetes.io/component: cache
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+        version: "7.2"
+    spec:
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+          command:
+            - redis-server
+            - "--save"
+            - "60 1"         # 60秒内有1次写操作则持久化
+            - "--loglevel"
+            - "notice"
+            - "--maxmemory"
+            - "128mb"
+            - "--maxmemory-policy"
+            - "allkeys-lru"  # 内存满时淘汰最近最少使用的 key
+          # ✅ 资源声明
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+            limits:
+              cpu: "200m"
+              memory: "256Mi"
+          # ✅ 存活探针：Redis PING 命令检测
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # ✅ 就绪探针
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: redis-data
+              mountPath: /data
+      volumes:
+        - name: redis-data
+          emptyDir: {}   # 演示用，生产环境应换为 PVC
+      terminationGracePeriodSeconds: 30
+
+---
+
+# Redis Service (ClusterIP)
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: demo-app
+  labels:
+    app: redis
+    app.kubernetes.io/part-of: demo-app
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      protocol: TCP
+      port: 6379
+      targetPort: 6379
+
+---
+
+# ========================================================
+# HorizontalPodAutoscaler (HPA) - 演示自动扩容
+# ========================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: order-service-hpa
+  namespace: demo-app
+  labels:
+    app: order-service
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: order-service
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70  # CPU 使用率超过 70% 时触发扩容
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60   # 扩容稳定窗口 60s
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300  # 缩容稳定窗口 5min（防止抖动）
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120

@@ -1,0 +1,55 @@
+# Git 版本控制忽略规则
+
+# ── 敏感信息（绝对不能提交到 Git）────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.secret.yaml
+*-secret-real.yaml
+
+# 包含真实密钥的 Secret 文件（使用 -real 后缀区分）
+k8s-manifests/n8n/n8n-secret-real.yaml
+
+# ── 系统文件 ──────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+
+# ── 工具产物 ──────────────────────────────────────────────────────
+# Minikube
+.minikube/
+
+# Helm 本地缓存
+*.tgz
+charts/
+
+# kubectl 临时生成的文件
+/tmp/
+
+# ── 日志文件 ──────────────────────────────────────────────────────
+*.log
+logs/
+audit-logs/
+
+# ── IDE 配置 ──────────────────────────────────────────────────────
+.idea/
+.vscode/settings.json
+*.code-workspace
+
+# ── Node.js（如后续添加工具脚本）────────────────────────────────
+node_modules/
+npm-debug.log*
+
+# ── Python（如后续添加 Python 工具脚本）─────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ── 测试和临时文件 ────────────────────────────────────────────────
+test-output/
+*.tmp
+/tmp/

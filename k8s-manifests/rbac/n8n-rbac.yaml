@@ -1,0 +1,125 @@
+---
+# n8n RBAC 配置
+# 为 n8n 创建 ServiceAccount 并授予最小权限，用于调用 K8s API 执行自愈操作
+# 应用方式: kubectl apply -f k8s-manifests/rbac/n8n-rbac.yaml
+---
+
+# ========================================================
+# ServiceAccount：n8n 的 K8s 身份
+# ========================================================
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: n8n-healer
+  namespace: monitoring
+  labels:
+    app: n8n
+    component: rbac
+  annotations:
+    description: "KubeSentinel n8n 自愈引擎的 K8s API 访问身份"
+
+---
+
+# ========================================================
+# ClusterRole：定义允许的操作权限（最小权限原则）
+# ========================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: n8n-healer-role
+  labels:
+    app: n8n
+    component: rbac
+rules:
+  # 读取 Pod 信息（查询时需要）
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "pods/status"]
+    verbs: ["get", "list", "watch"]
+
+  # 删除 Pod（触发重启效果）
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete"]
+
+  # 读取和更新 Deployment（滚动重启、扩缩容）
+  - apiGroups: ["apps"]
+    resources: ["deployments", "deployments/status"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+
+  # 回滚 Deployment（需要修改 spec）
+  - apiGroups: ["apps"]
+    resources: ["deployments/rollback"]
+    verbs: ["create"]
+
+  # 读取和修改 HPA（自动扩缩容）
+  - apiGroups: ["autoscaling"]
+    resources: ["horizontalpodautoscalers"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+
+  # 读取 Node 信息（节点故障诊断）
+  - apiGroups: [""]
+    resources: ["nodes", "nodes/status"]
+    verbs: ["get", "list", "watch"]
+
+  # Cordon/Uncordon Node（标记节点不可调度）
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["patch"]
+
+  # 读取 Events（故障上下文）
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+
+  # 读取 Services 和 Endpoints（服务健康状态）
+  - apiGroups: [""]
+    resources: ["services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+
+  # 读取 Namespaces
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list"]
+
+  # 读取 ReplicaSets（Deployment 历史版本）
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+
+---
+
+# ========================================================
+# ClusterRoleBinding：绑定 ServiceAccount 到 ClusterRole
+# ========================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: n8n-healer-binding
+  labels:
+    app: n8n
+    component: rbac
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: n8n-healer-role
+subjects:
+  - kind: ServiceAccount
+    name: n8n-healer
+    namespace: monitoring
+
+---
+
+# ========================================================
+# Secret：为 n8n 生成长期有效的 API Token
+# ========================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: n8n-healer-token
+  namespace: monitoring
+  labels:
+    app: n8n
+    component: rbac
+  annotations:
+    kubernetes.io/service-account.name: n8n-healer
+type: kubernetes.io/service-account-token

@@ -1,0 +1,81 @@
+---
+# Alertmanager 路由与通知配置
+# 将 PrometheusRule 告警路由到 n8n Webhook
+# 应用方式: 此配置将通过 Helm values 或 Secret 覆盖默认配置
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: alertmanager-kubesentinel-config
+  namespace: monitoring
+  labels:
+    app: alertmanager
+type: Opaque
+stringData:
+  alertmanager.yaml: |
+    global:
+      # 全局解析超时（告警 firing 停止后多久认为已恢复）
+      resolve_timeout: 5m
+      # 如果使用 SMTP 通知（可选）
+      # smtp_smarthost: 'smtp.gmail.com:587'
+
+    # 告警路由树
+    route:
+      # 默认分组策略
+      group_by: ['alertname', 'namespace', 'pod']
+      group_wait: 30s       # 等待 30s 收集同组告警后批量发送
+      group_interval: 5m    # 同组告警的发送间隔
+      repeat_interval: 1h   # 持续告警重复通知间隔
+
+      # 默认接收器（所有未匹配路由的告警）
+      receiver: 'n8n-webhook'
+
+      routes:
+        # Critical 级别告警：立即发送到 n8n，不等待分组
+        - match:
+            severity: critical
+          receiver: 'n8n-webhook'
+          group_wait: 10s
+          repeat_interval: 30m
+          continue: false
+
+        # Warning 级别告警：正常路由
+        - match:
+            severity: warning
+          receiver: 'n8n-webhook'
+          group_wait: 30s
+          continue: false
+
+        # 测试告警（TestAlert）：不触发实际操作
+        - match:
+            alertname: TestAlert
+          receiver: 'null-receiver'
+
+    # 告警抑制规则（防止告警风暴）
+    inhibit_rules:
+      # 如果 critical 告警已触发，抑制同一 Pod 的 warning 告警
+      - source_match:
+          severity: critical
+        target_match:
+          severity: warning
+        equal:
+          - namespace
+          - pod
+
+    # 接收器定义
+    receivers:
+      # n8n Webhook 接收器（主力）
+      - name: 'n8n-webhook'
+        webhook_configs:
+          - url: 'http://n8n:5678/webhook/alertmanager'
+            send_resolved: true    # 告警恢复时也发送通知
+            http_config:
+              # 如果 n8n 配置了 Basic Auth
+              # basic_auth:
+              #   username: admin
+              #   password_file: /etc/alertmanager/n8n-password
+            max_alerts: 10        # 单次最多发送 10 条告警
+            timeout: 30s
+
+      # 空接收器（用于抑制不需要的告警）
+      - name: 'null-receiver'

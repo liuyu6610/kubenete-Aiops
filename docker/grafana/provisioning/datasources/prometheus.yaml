@@ -1,0 +1,10 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # docker-compose 环境下使用容器名
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false

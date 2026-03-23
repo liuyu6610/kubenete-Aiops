@@ -1,0 +1,119 @@
+{
+  "__comment": "KubeSentinel Grafana 仪表盘 - 骨架占位文件",
+  "__status": "TODO: 在实际开发阶段，通过 Grafana UI 设计仪表盘后导出 JSON 替换此文件",
+  "__how_to_export": "Grafana UI → Dashboard → Share → Export → Download JSON",
+  "__how_to_import": "Grafana UI → Dashboards → Import → Upload JSON file",
+
+  "id": null,
+  "uid": "kubesentinel-overview",
+  "title": "KubeSentinel - 智能自愈总览",
+  "tags": ["kubesentinel", "aiops", "self-healing"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 0,
+  "refresh": "30s",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+
+  "annotations": {
+    "list": [
+      {
+        "name": "自愈事件标注",
+        "datasource": "Prometheus",
+        "enable": true,
+        "hide": false,
+        "iconColor": "green",
+        "type": "dashboard",
+        "__comment": "TODO: 配置自愈操作执行时刻的时间轴标注，便于与指标趋势关联"
+      }
+    ]
+  },
+
+  "panels": [
+    {
+      "__comment": "TODO: 面板 1 - 集群 Pod 健康状态总览（stat 类型）",
+      "id": 1,
+      "type": "stat",
+      "title": "Pod 健康状态",
+      "gridPos": {"h": 4, "w": 6, "x": 0, "y": 0},
+      "targets": [
+        {
+          "__comment": "TODO: 填入 PromQL 查询就绪 Pod 数量",
+          "expr": "sum(kube_pod_status_ready{condition='true', namespace=~'demo-app'}) by (namespace)",
+          "legendFormat": "就绪 Pod 数"
+        }
+      ]
+    },
+    {
+      "__comment": "TODO: 面板 2 - CPU 使用率时序图（timeseries 类型）",
+      "id": 2,
+      "type": "timeseries",
+      "title": "微服务 CPU 使用率",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 4},
+      "targets": [
+        {
+          "__comment": "TODO: 填入 PromQL CPU 使用率聚合查询",
+          "expr": "sum(rate(container_cpu_usage_seconds_total{namespace='demo-app', container!=''}[5m])) by (pod)",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "__comment": "TODO: 面板 3 - 内存使用率时序图",
+      "id": 3,
+      "type": "timeseries",
+      "title": "微服务内存使用率",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 4},
+      "targets": [
+        {
+          "__comment": "TODO: 填入 PromQL 内存使用率查询",
+          "expr": "sum(container_memory_working_set_bytes{namespace='demo-app', container!=''}) by (pod)",
+          "legendFormat": "{{pod}}"
+        }
+      ]
+    },
+    {
+      "__comment": "TODO: 面板 4 - Pod 重启次数计数（stat 类型，触发条件统计）",
+      "id": 4,
+      "type": "stat",
+      "title": "Pod 重启次数（1h）",
+      "gridPos": {"h": 4, "w": 6, "x": 6, "y": 0},
+      "targets": [
+        {
+          "__comment": "TODO: 填入 Pod 重启次数增量查询",
+          "expr": "sum(increase(kube_pod_container_status_restarts_total{namespace='demo-app'}[1h]))",
+          "legendFormat": "重启次数"
+        }
+      ]
+    },
+    {
+      "__comment": "TODO: 面板 5 - 活跃告警列表（alert list 类型）",
+      "id": 5,
+      "type": "alertlist",
+      "title": "当前活跃告警",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 12}
+    },
+    {
+      "__comment": "TODO: 面板 6 - 自愈操作执行历史表格（table 类型，从日志/指标读取）",
+      "id": 6,
+      "type": "table",
+      "title": "自愈操作历史记录",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 20}
+    }
+  ],
+
+  "templating": {
+    "list": [
+      {
+        "name": "namespace",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(kube_pod_info, namespace)",
+        "label": "命名空间",
+        "__comment": "TODO: 命名空间下拉过滤变量"
+      }
+    ]
+  }
+}

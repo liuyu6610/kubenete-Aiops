@@ -1,0 +1,58 @@
+---
+# KubeSentinel v2.0 - 自研后端部署清单模板
+# d:\school-project\KubeSentinel-aiops\k8s-manifests\kubesentinel-v2\backend-deployment.yaml
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kubesentinel-backend
+  namespace: monitoring
+  labels:
+    app: kubesentinel-backend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kubesentinel-backend
+  template:
+    metadata:
+      labels:
+        app: kubesentinel-backend
+    spec:
+      serviceAccountName: n8n-healer # 复用此SA，因其已有足够权限
+      containers:
+        - name: backend
+          image: kubesentinel/backend:latest # TODO: 构建后的镜像
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          env:
+            - name: LLM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: n8n-credentials  # 复用 V1 的 Secret
+                  key: DASHSCOPE_API_KEY
+            - name: PROMETHEUS_URL
+              value: "http://kube-prometheus-stack-prometheus.monitoring:9090"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kubesentinel-backend
+  namespace: monitoring
+spec:
+  type: ClusterIP
+  selector:
+    app: kubesentinel-backend
+  ports:
+    - protocol: TCP
+      port: 8000
+      targetPort: 8000

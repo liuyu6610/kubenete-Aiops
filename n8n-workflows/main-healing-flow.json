@@ -1,0 +1,210 @@
+{
+  "name": "KubeSentinel - 主力自愈工作流",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "alertmanager",
+        "responseMode": "onReceived",
+        "responseData": "allEntries"
+      },
+      "id": "webhook-trigger",
+      "name": "Alertmanager Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [240, 300],
+      "webhookId": "kubesentinel-alertmanager"
+    },
+    {
+      "parameters": {
+        "jsCode": "// 解析 Alertmanager Webhook 数据\nconst body = $input.first().json;\nconst alerts = body.alerts || [];\n\n// 只处理 firing 状态的告警\nconst firingAlerts = alerts.filter(a => a.status === 'firing');\n\nif (firingAlerts.length === 0) {\n  console.log('No firing alerts, skipping...');\n  return [];\n}\n\n// 取第一条告警处理（实际可扩展为并发处理多条）\nconst alert = firingAlerts[0];\nconst labels = alert.labels || {};\nconst annotations = alert.annotations || {};\n\nreturn [{\n  json: {\n    alert_name: labels.alertname,\n    severity: labels.severity,\n    status: alert.status,\n    fired_at: alert.startsAt,\n    namespace: labels.namespace || 'default',\n    pod_name: labels.pod || '',\n    container_name: labels.container || '',\n    deployment_name: labels.deployment || labels.pod?.replace(/-[a-z0-9]{5}-[a-z0-9]{5}$/, '') || '',\n    summary: annotations.summary || '',\n    description: annotations.description || '',\n    action_hint: labels.action_type || '',\n    labels: labels,\n    raw_alert: alert\n  }\n}];"
+      },
+      "id": "parse-alert",
+      "name": "解析告警数据",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "url": "=http://kube-prometheus-stack-prometheus.monitoring:9090/api/v1/query",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "=rate(container_cpu_usage_seconds_total{pod=\"{{ $json.pod_name }}\", container!=\"\"}[5m]) / kube_pod_container_resource_limits{pod=\"{{ $json.pod_name }}\", resource=\"cpu\"}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "query-prometheus",
+      "name": "查询 Prometheus 指标",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 构建发送给 LLM 的 Prompt\nconst alertData = $('解析告警数据').first().json;\nconst promData = $input.first().json;\n\n// 解析 Prometheus 返回的指标\nlet cpuUsagePct = 'N/A';\ntry {\n  const result = promData.data?.result?.[0]?.value?.[1];\n  if (result) cpuUsagePct = (parseFloat(result) * 100).toFixed(1) + '%';\n} catch(e) {}\n\nconst userMessage = `\n请根据以下 Kubernetes 集群告警信息，输出标准化的 JSON 修复方案。\n\n## 告警详情\n- 告警名称: ${alertData.alert_name}\n- 告警级别: ${alertData.severity}\n- 触发时间: ${alertData.fired_at}\n- 命名空间: ${alertData.namespace}\n- Pod: ${alertData.pod_name}\n- Deployment: ${alertData.deployment_name}\n\n## 告警描述\n${alertData.summary}\n${alertData.description}\n\n## 实时指标\n- CPU 使用率: ${cpuUsagePct}\n- 预期操作类型(参考): ${alertData.action_hint}\n\n请严格按 JSON schema 输出分析结论和修复方案。\n`;\n\nreturn [{\n  json: {\n    ...alertData,\n    cpu_usage: cpuUsagePct,\n    llm_user_message: userMessage\n  }\n}];"
+      },
+      "id": "build-prompt",
+      "name": "构建 LLM Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "url": "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={\n  \"model\": \"qwen-turbo\",\n  \"input\": {\n    \"messages\": [\n      {\n        \"role\": \"system\",\n        \"content\": \"你是 KubeSentinel，一位顶级 SRE 工程师。你的输出必须且只能是合法的 JSON 对象，包含 analysis、confidence、action、target、risk_level、human_approval_required、notify、summary_for_notification 字段。禁止在 JSON 之外输出任何文字。\"\n      },\n      {\n        \"role\": \"user\",\n        \"content\": \"{{ $json.llm_user_message }}\"\n      }\n    ]\n  },\n  \"parameters\": {\n    \"max_tokens\": 1024,\n    \"temperature\": 0.1,\n    \"result_format\": \"message\"\n  }\n}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "call-llm",
+      "name": "调用 LLM API (通义千问)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1120, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 解析 LLM 返回的 JSON 修复方案\nconst llmResponse = $input.first().json;\nconst alertData = $('构建 LLM Prompt').first().json;\n\nlet healingPlan;\ntry {\n  // 从 LLM 响应中提取 JSON\n  const content = llmResponse.output?.choices?.[0]?.message?.content ||\n                  llmResponse.choices?.[0]?.message?.content || '';\n  \n  // 尝试直接解析 JSON\n  const jsonMatch = content.match(/\\{[\\s\\S]*\\}/);\n  if (jsonMatch) {\n    healingPlan = JSON.parse(jsonMatch[0]);\n  } else {\n    throw new Error('No JSON found in LLM response');\n  }\n} catch(e) {\n  console.error('LLM response parse error:', e.message);\n  // 降级：发送人工告警\n  healingPlan = {\n    analysis: 'LLM响应解析失败，需要人工介入',\n    confidence: 0,\n    action: 'investigate',\n    risk_level: 'high',\n    human_approval_required: true,\n    notify: true,\n    summary_for_notification: `🔴 [KubeSentinel] 告警 ${alertData.alert_name} 需要人工处理（AI决策失败）`\n  };\n}\n\nreturn [{\n  json: {\n    ...alertData,\n    healing_plan: healingPlan,\n    should_auto_execute: healingPlan.confidence > 0.75 && !healingPlan.human_approval_required && healingPlan.action !== 'no_action' && healingPlan.action !== 'investigate'\n  }\n}];"
+      },
+      "id": "parse-llm-response",
+      "name": "解析 LLM 决策",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.should_auto_execute }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ]
+        }
+      },
+      "id": "decision-gate",
+      "name": "是否自动执行？",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://kubernetes.default.svc/apis/apps/v1/namespaces/{{ $json.healing_plan.target.namespace }}/deployments/{{ $json.healing_plan.target.name }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $credentials.token }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/strategic-merge-patch+json"
+            }
+          ]
+        },
+        "method": "PATCH",
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={\n  \"spec\": {\n    \"template\": {\n      \"metadata\": {\n        \"annotations\": {\n          \"kubectl.kubernetes.io/restartedAt\": \"{{ $now.toISO() }}\"\n        }\n      }\n    }\n  }\n}",
+        "options": {
+          "timeout": 15000,
+          "allowUnauthorizedCerts": true
+        }
+      },
+      "id": "execute-restart",
+      "name": "执行: 滚动重启",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [1780, 180]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.FEISHU_WEBHOOK_URL }}",
+        "method": "POST",
+        "sendBody": true,
+        "bodyContentType": "json",
+        "jsonBody": "={\n  \"msg_type\": \"interactive\",\n  \"card\": {\n    \"header\": {\n      \"title\": {\n        \"content\": \"🛡️ KubeSentinel 自愈报告\",\n        \"tag\": \"plain_text\"\n      },\n      \"template\": \"{{ $json.healing_plan.risk_level === 'high' ? 'red' : $json.healing_plan.risk_level === 'medium' ? 'orange' : 'green' }}\"\n    },\n    \"elements\": [\n      {\n        \"tag\": \"div\",\n        \"text\": {\n          \"content\": \"**告警**: {{ $json.alert_name }}\\n**操作**: {{ $json.healing_plan.action }}\\n**置信度**: {{ ($json.healing_plan.confidence * 100).toFixed(0) }}%\\n\\n{{ $json.healing_plan.summary_for_notification }}\",\n          \"tag\": \"lark_md\"\n        }\n      }\n    ]\n  }\n}",
+        "options": {}
+      },
+      "id": "notify-feishu",
+      "name": "通知飞书群",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [2000, 300]
+    }
+  ],
+  "connections": {
+    "Alertmanager Webhook": {
+      "main": [[{"node": "解析告警数据", "type": "main", "index": 0}]]
+    },
+    "解析告警数据": {
+      "main": [[{"node": "查询 Prometheus 指标", "type": "main", "index": 0}]]
+    },
+    "查询 Prometheus 指标": {
+      "main": [[{"node": "构建 LLM Prompt", "type": "main", "index": 0}]]
+    },
+    "构建 LLM Prompt": {
+      "main": [[{"node": "调用 LLM API (通义千问)", "type": "main", "index": 0}]]
+    },
+    "调用 LLM API (通义千问)": {
+      "main": [[{"node": "解析 LLM 决策", "type": "main", "index": 0}]]
+    },
+    "解析 LLM 决策": {
+      "main": [[{"node": "是否自动执行？", "type": "main", "index": 0}]]
+    },
+    "是否自动执行？": {
+      "main": [
+        [{"node": "执行: 滚动重启", "type": "main", "index": 0}],
+        [{"node": "通知飞书群", "type": "main", "index": 0}]
+      ]
+    },
+    "执行: 滚动重启": {
+      "main": [[{"node": "通知飞书群", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromAList",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": ["kubesentinel", "aiops", "self-healing"],
+  "triggerCount": 0,
+  "updatedAt": "2025-01-01T00:00:00.000Z",
+  "versionId": "1"
+}

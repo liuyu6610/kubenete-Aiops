@@ -1,0 +1,104 @@
+{
+  "name": "KubeSentinel - 消息通知子工作流",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            {"name": "alert_name", "type": "string"},
+            {"name": "severity", "type": "string"},
+            {"name": "action_taken", "type": "string"},
+            {"name": "target_resource", "type": "string"},
+            {"name": "confidence", "type": "number"},
+            {"name": "analysis", "type": "string"},
+            {"name": "success", "type": "boolean"},
+            {"name": "risk_level", "type": "string"}
+          ]
+        }
+      },
+      "id": "workflow-trigger",
+      "name": "子工作流触发器",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1,
+      "position": [240, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// 根据告警级别和执行结果构建通知消息\nconst data = $input.first().json;\n\nconst severityEmoji = {\n  'critical': '🔴',\n  'warning': '🟡',\n  'info': '🟢'\n}[data.severity] || '⚪';\n\nconst successEmoji = data.success ? '✅' : '❌';\nconst riskColor = {\n  'high': 'red',\n  'medium': 'orange',\n  'low': 'green'\n}[data.risk_level] || 'grey';\n\nconst confidencePct = Math.round((data.confidence || 0) * 100);\n\nconst feishuCard = {\n  msg_type: 'interactive',\n  card: {\n    header: {\n      title: {\n        content: `${severityEmoji} KubeSentinel 自愈${data.success ? '成功' : '需人工介入'}`,\n        tag: 'plain_text'\n      },\n      template: riskColor\n    },\n    elements: [\n      {\n        tag: 'div',\n        text: {\n          content: [\n            `**告警名称:** ${data.alert_name}`,\n            `**受影响资源:** ${data.target_resource}`,\n            `**告警级别:** ${data.severity}`,\n            `**AI 分析:**\\n> ${data.analysis}`,\n            `**执行操作:** \\`${data.action_taken}\\``,\n            `**置信度:** ${confidencePct}%`,\n            `**执行状态:** ${successEmoji} ${data.success ? '自动处理成功' : '需要人工确认'}`\n          ].join('\\n'),\n          tag: 'lark_md'\n        }\n      },\n      {\n        tag: 'hr'\n      },\n      {\n        tag: 'note',\n        elements: [{\n          tag: 'plain_text',\n          content: `KubeSentinel AIOps | ${new Date().toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai'})}`\n        }]\n      }\n    ]\n  }\n};\n\n// 简单文本格式（钉钉）\nconst dingtalkText = {\n  msgtype: 'markdown',\n  markdown: {\n    title: `KubeSentinel: ${data.alert_name}`,\n    text: [\n      `## ${severityEmoji} KubeSentinel 自愈报告`,\n      `**告警:** ${data.alert_name}`,\n      `**目标:** ${data.target_resource}`,\n      `**分析:** ${data.analysis}`,\n      `**操作:** ${data.action_taken}`,\n      `**结果:** ${successEmoji}`,\n      '',\n      `> KubeSentinel AIOps`\n    ].join('\\n')\n  }\n};\n\nreturn [{\n  json: {\n    ...data,\n    feishu_card: feishuCard,\n    dingtalk_text: dingtalkText,\n    notification_title: `KubeSentinel: ${data.alert_name} - ${data.success ? '已自愈' : '需人工介入'}`\n  }\n}];"
+      },
+      "id": "build-notification",
+      "name": "构建通知消息",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.FEISHU_WEBHOOK_URL }}",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.feishu_card) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "send-feishu",
+      "name": "发送飞书通知",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [680, 200],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.DINGTALK_WEBHOOK_URL }}",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($('构建通知消息').first().json.dingtalk_text) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "send-dingtalk",
+      "name": "发送钉钉通知",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [680, 400],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// 汇总通知结果\nconst feishuResult = $('发送飞书通知').first().json;\nconst dingtalkResult = $('发送钉钉通知').first().json;\n\nconsole.log('Feishu notification sent:', JSON.stringify(feishuResult));\nconsole.log('DingTalk notification sent:', JSON.stringify(dingtalkResult));\n\nreturn [{\n  json: {\n    feishu_success: feishuResult?.StatusCode === 0 || feishuResult?.ok,\n    dingtalk_success: dingtalkResult?.errcode === 0,\n    timestamp: new Date().toISOString()\n  }\n}];"
+      },
+      "id": "finalize",
+      "name": "完成",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [900, 300]
+    }
+  ],
+  "connections": {
+    "子工作流触发器": {
+      "main": [[{"node": "构建通知消息", "type": "main", "index": 0}]]
+    },
+    "构建通知消息": {
+      "main": [
+        [{"node": "发送飞书通知", "type": "main", "index": 0}],
+        [{"node": "发送钉钉通知", "type": "main", "index": 0}]
+      ]
+    },
+    "发送飞书通知": {
+      "main": [[{"node": "完成", "type": "main", "index": 0}]]
+    },
+    "发送钉钉通知": {
+      "main": [[{"node": "完成", "type": "main", "index": 0}]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": ["kubesentinel", "notification"],
+  "versionId": "1"
+}

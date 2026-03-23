@@ -1,0 +1,138 @@
+{
+  "name": "KubeSentinel AIOps Human-in-the-Loop",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "kubesentinel",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "id": "e1f13a0c-85a2-4a0b-8d5c-9d6a3f9e8f1b",
+      "name": "KubeSentinel Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        300
+      ],
+      "webhookId": "kubesentinel-hook-123"
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.headers['x-event-type'] }}",
+        "rules": {
+          "rules": [
+            {
+              "operation": "equal",
+              "value2": "approval_needed",
+              "output": 0
+            }
+          ]
+        },
+        "fallbackOutput": 1
+      },
+      "id": "8f8a2f4c-7c0d-4b8c-a1d2-b6d4e8c1f9d2",
+      "name": "Event Router",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [
+        450,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "post",
+        "channel": "aiops-incidents",
+        "text": "=🚨 *KubeSentinel Requires Approval*\n\n*Alert ID:* `{{ $json.body.alert_id }}`\n*Alert Name:* `{{ $json.body.alert_name }}`\n*Target:* `{{ $json.body.target }}` in `{{ $json.body.namespace }}`\n\n*Proposed Action:* `{{ $json.body.action }}`\n*AI Confidence:* {{( $json.body.confidence * 100 ).toFixed(1)}}%\n*Risk Level:* `{{ $json.body.risk_level }}`\n\n*Analysis:* \n> {{ $json.body.analysis }}",
+        "otherOptions": {}
+      },
+      "id": "c1d4e7f8-9b0a-4c2d-b3e1-a5f6c8e9b0d1",
+      "name": "Slack Notification (Pending)",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 1,
+      "position": [
+        700,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:8000/api/v1/n8n/callback",
+        "authentication": "none",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-KubeSentinel-Token",
+              "value": "super-secure-token"
+            }
+          ]
+        },
+        "sendBody": true,
+        "body": {
+          "contentType": "json",
+          "content": {
+            "alert_id": "={{ $('KubeSentinel Webhook').item.json.body.alert_id }}",
+            "action_type": "approve",
+            "comment": "Approved automatically by Slack integration layer in n8n.",
+            "operator": "n8n_admin_system"
+          }
+        },
+        "options": {}
+      },
+      "id": "f5d7b8e9-0c1f-4d2a-a3b4-c6e7f8a9b1c2",
+      "name": "Authorize Action Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 3,
+      "position": [
+        950,
+        200
+      ]
+    }
+  ],
+  "connections": {
+    "KubeSentinel Webhook": {
+      "main": [
+        [
+          {
+            "node": "Event Router",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Event Router": {
+      "main": [
+        [
+          {
+            "node": "Slack Notification (Pending)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Slack Notification (Pending)": {
+      "main": [
+        [
+          {
+            "node": "Authorize Action Callback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "tags": []
+}
