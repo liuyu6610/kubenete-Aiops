@@ -13,6 +13,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 )
 
 var (
@@ -22,7 +23,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
-	// Setup HealingRule CRD API scheme
+	// 注册 HealingRule CRD API scheme
 	utilruntime.Must(kubesentinelv1beta1.AddToScheme(scheme))
 }
 
@@ -44,9 +45,10 @@ func main() {
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		MetricsBindAddress:     metricsAddr,
-		Port:                   9443,
+		Scheme: scheme,
+		Metrics: metricsserver.Options{
+			BindAddress: metricsAddr,
+		},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
 		LeaderElectionID:       "6b1c4b12.kubesentinel.io",
@@ -56,7 +58,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Setup HealingRule Reconciler with Manager
+	// 将 HealingRule 控制器注册到 Manager
 	if err = (&controllers.HealingRuleReconciler{
 		Client: mgr.GetClient(),
 		Scheme: mgr.GetScheme(),
